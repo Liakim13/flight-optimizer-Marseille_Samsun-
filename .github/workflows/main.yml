@@ -1,0 +1,132 @@
+# Scan quotidien des vols MRS ↔ SZF — GitHub Actions (PC éteint)
+#
+# Fuseau horaire : GitHub Actions utilise UTC.
+# 20h00 à Paris (CET, UTC+1)  → cron: '0 19 * * *'
+# 20h00 à Paris (CEST, UTC+2) → cron: '0 18 * * *'
+
+name: Scan vols MRS-SZF
+
+on:
+  schedule:
+    - cron: "0 19 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: flight-scan
+  cancel-in-progress: false
+
+jobs:
+  scan-and-report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    env:
+      # ══════════════════════════════════════════════════════════
+      # SECRETS — Settings → Secrets and variables → Actions
+      # Voir docs/GITHUB_SECRETS.md pour le guide pas à pas
+      # ══════════════════════════════════════════════════════════
+      SERPAPI_API_KEY: ${{ secrets.SERPAPI_API_KEY }}
+      SMTP_USER: ${{ secrets.SMTP_USER }}
+      SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+      EMAIL_TO: ${{ secrets.EMAIL_TO }}
+      EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
+
+      # ══════════════════════════════════════════════════════════
+      # OPTIMISATION SerpApi — réduction du nombre de requêtes
+      # ══════════════════════════════════════════════════════════
+      SCAN_STEP_DAYS: "7"          # 1 date / semaine (~13 ancres sur 3 mois)
+      MAX_OPTIONS_PER_SEARCH: "1"  # 1 seul vol analysé par recherche
+      API_CACHE_HOURS: "168"       # Cache 7 jours (aligné sur le pas hebdo)
+      MAX_API_CALLS_PER_RUN: "200" # Plafond de sécurité SerpApi
+
+      # --- Paramètres de scan ---
+      SCAN_MONTHS: "3"
+      DATE_OFFSET_DAYS: "2"
+      STAY_PROFILES_DAYS: "14,21,28"
+      MIN_LAYOVER_MINUTES: "45"
+      MAX_LAYOVER_MINUTES: "360"
+      API_DELAY_SECONDS: "1.5"
+
+      # --- Itinéraire ---
+      DEPARTURE_AIRPORT: MRS
+      ARRIVAL_AIRPORT: SZF
+      HUB_AIRPORTS: IST,SAW
+      TARGET_AIRLINES: TK,PC
+
+      # --- Alertes & localisation ---
+      PRICE_DROP_THRESHOLD_PERCENT: "5"
+      PRICE_DROP_THRESHOLD_EUR: "30"
+      CURRENCY: EUR
+      GL: fr
+      HL: fr
+
+      # --- SMTP (hôte/port publics ; identifiants dans les secrets) ---
+      SMTP_HOST: smtp.gmail.com
+      SMTP_PORT: "587"
+      DATABASE_PATH: data/prices.db
+
+    steps:
+      - name: Checkout du dépôt
+        uses: actions/checkout@v4
+
+      - name: Restaurer l'historique SQLite et le cache SerpApi
+        uses: actions/cache@v4
+        with:
+          path: data
+          key: flight-optimizer-db-v1
+
+      - name: Configurer Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Installer les dépendances
+        run: pip install -r requirements.txt
+
+      - name: Vérifier les secrets obligatoires
+        run: |
+          missing=0
+          for var in SERPAPI_API_KEY SMTP_USER SMTP_PASSWORD EMAIL_TO; do
+            if [ -z "${!var}" ]; then
+              echo "::error::Secret manquant ou vide : $var"
+              missing=1
+            fi
+          done
+          if [ -z "$EMAIL_FROM" ]; then
+            echo "EMAIL_FROM non défini — utilisation de SMTP_USER comme expéditeur"
+            echo "EMAIL_FROM=$SMTP_USER" >> "$GITHUB_ENV"
+          fi
+          if [ "$missing" -eq 1 ]; then
+            echo ""
+            echo "Configurez les secrets : Settings → Secrets and variables → Actions"
+            echo "Guide complet : docs/GITHUB_SECRETS.md"
+            exit 1
+          fi
+
+      - name: Afficher le budget API estimé
+        run: |
+          python -c "
+          from src.config import Config
+          c = Config.from_env()
+          print(f'SCAN_STEP_DAYS={c.scan_step_days} → {c.count_anchor_dates()} dates de référence')
+          print(f'Combinaisons à évaluer : {c.count_date_combinations()}')
+          print(f'Budget max SerpApi     : {c.max_api_calls_per_run} appels/run')
+          print(f'Estimation sans cache    : {c.estimate_max_api_calls()} appels')
+          print(f'Cache API              : {c.api_cache_hours}h ({c.api_cache_hours // 24} jours)')
+          print('Après le 1er run, le cache réduit fortement la consommation.')
+          "
+
+      - name: Lancer le scan et envoyer le rapport
+        run: python main.py
+
+      - name: Archiver le dernier rapport HTML
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rapport-vols-${{ github.run_number }}
+          path: |
+            data/dernier_rapport.html
+            flight_optimizer.log
+          retention-days: 30
+          if-no-files-found: ignore
