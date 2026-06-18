@@ -1,14 +1,13 @@
 # Scan quotidien des vols MRS ↔ SZF — GitHub Actions (PC éteint)
 #
 # Fuseau horaire : GitHub Actions utilise UTC.
-# 20h00 à Paris (CET, UTC+1)  → cron: '0 19 * * *'
-# 20h00 à Paris (CEST, UTC+2) → cron: '0 18 * * *'
+# 8h00 à Paris (CET/CEST) → cron: '0 6 * * *'
 
 name: Scan vols MRS-SZF
 
 on:
   schedule:
-    - cron: "0 19 * * *"
+    - cron: "0 6 * * *"
   workflow_dispatch:
 
 concurrency:
